@@ -656,7 +656,7 @@ services:
   # 8. Certbot Automated Certificate Renewal (initial issuance: infra/ssl/issue-certs.sh)
   #    Runs as root (owns the certificate volume) with no capabilities at all.
   certbot:
-    image: certbot/certbot:v2.11.0@sha256:ddf9e5d226a56e886986838fa0ebedc0237511c78664352e8d0f4346ee022cd8
+    image: certbot/certbot:v5.8.0@sha256:f70ad0adbb7e117f0fe42a63c553f28ea451edabc0148757b6efcd9735acaa20
     container_name: gcdis-certbot
     restart: always
     <<: *app-hardening
