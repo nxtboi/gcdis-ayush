@@ -1,0 +1,598 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum Role {
+  SUPER_ADMIN
+  EVENT_ADMIN
+  JUDGE
+  INSPECTOR
+  TEAM_CAPTAIN
+  TEAM_MEMBER
+}
+
+enum RegistrationStatus {
+  DRAFT
+  SUBMITTED
+  FACULTY_ENDORSED
+  ADMINISTRATIVE_REVIEW
+  PAYMENT_PENDING
+  PAYMENT_VERIFIED
+  DOCUMENT_REVIEW
+  TECHNICAL_SUBMISSION
+  TECHNICAL_INSPECTION
+  ELIGIBILITY_REVIEW
+  APPROVED
+  ACCREDITED
+  COMPETING
+  ARENA_CLEARED
+  COMPLETED
+  REQUIRES_ACTION
+  REJECTED
+  WITHDRAWN
+  CANCELLED
+}
+
+enum PaymentStatus {
+  PENDING
+  SUCCESS
+  FAILED
+  REFUNDED
+}
+
+enum DocumentStatus {
+  PENDING
+  VERIFIED
+  REJECTED
+}
+
+enum InspectionStatus {
+  PASSED
+  FAILED
+  CONDITIONAL
+}
+
+enum MatchStage {
+  QUALIFIER
+  QUARTER_FINAL
+  SEMI_FINAL
+  FINAL
+}
+
+enum MatchStatus {
+  SCHEDULED
+  CHECK_IN
+  READY
+  LIVE
+  PAUSED
+  COMPLETED
+  VERIFIED
+}
+
+model User {
+  id                   String        @id @default(uuid())
+  email                String        @unique
+  passwordHash         String
+  fullName             String
+  role                 Role          @default(TEAM_CAPTAIN)
+  phone                String?
+  organization         String?
+  isPasswordTemporary  Boolean       @default(false)
+  mustChangePassword   Boolean       @default(false)
+  isTwoFactorEnabled   Boolean       @default(false)
+  isActive             Boolean       @default(true)
+  /// Google account subject ("sub" claim) linked via Sign in with Google. Team captains only.
+  googleSub            String?       @unique
+  /// How the account was first created: "password" or "google".
+  authProvider         String        @default("password")
+  /// When the email address was confirmed (verification link, Google sign-in or password reset). Null = unverified.
+  emailVerifiedAt      DateTime?
+  createdAt            DateTime      @default(now())
+  updatedAt            DateTime      @updatedAt
+  teamsLed             Team[]        @relation("TeamCaptain")
+  memberships          TeamMember[]
+  sessions             Session[]
+  twoFactor            TwoFactor?
+  authTokens           AuthToken[]
+
+  @@index([role])
+  @@map("users")
+}
+
+model TwoFactor {
+  id           String    @id @default(uuid())
+  userId       String    @unique
+  secret       String
+  isEnabled    Boolean   @default(false)
+  isEnrolled   Boolean   @default(false)
+  backupCodes  Json?
+  lastUsedStep Int?
+  enrolledAt   DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("two_factors")
+}
+
+model Session {
+  id               String    @id @default(uuid())
+  userId           String
+  familyId         String?
+  refreshTokenHash String    @unique
+  ipAddress        String?
+  userAgent        String?
+  isActive         Boolean   @default(true)
+  expiresAt        DateTime
+  revokedAt        DateTime?
+  /// Last successful step-up re-authentication (TOTP or recovery code) for this session. Window: 10 minutes.
+  stepUpAt         DateTime?
+  /// Last time this session was refreshed (refresh-token rotation).
+  lastUsedAt       DateTime?
+  /// Last authenticated API activity of a staff session (written at most once a minute; idle timeout).
+  lastSeenAt       DateTime?
+  /// Why the session was revoked by the server (IDLE_TIMEOUT, SESSION_LIMIT); null for sign-out and rotation.
+  revokedReason    String?   @db.VarChar(32)
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  user             User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+  @@index([familyId])
+  @@map("sessions")
+}
+
+enum AuthTokenKind {
+  EMAIL_VERIFY
+  PASSWORD_RESET
+}
+
+/// Single-use email tokens (verification, password reset). Only the SHA-256 hash of the token is stored.
+model AuthToken {
+  id        String        @id @default(uuid())
+  userId    String
+  kind      AuthTokenKind
+  tokenHash String        @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime      @default(now())
+  /// Email verification codes: wrong attempts so far (the code is burned at 5)
+  attempts  Int           @default(0)
+  /// Email verification codes: AES-256-GCM ciphertext of the code (staff reveal); cleared once used or replaced
+  codeCipher String?
+  user      User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, kind, createdAt])
+  @@map("auth_tokens")
+}
+
+model LoginAttempt {
+  id            String   @id @default(uuid())
+  email         String
+  ipAddress     String?
+  successful    Boolean
+  failureReason String?
+  attemptedAt   DateTime @default(now())
+
+  @@index([email, attemptedAt])
+  @@index([ipAddress, attemptedAt])
+  @@map("login_attempts")
+}
+
+model SiteSetting {
+  id          String   @id @default(uuid())
+  key         String   @unique
+  value       Json
+  description String?
+  updatedBy   String?
+  updatedAt   DateTime @updatedAt
+
+  @@map("site_settings")
+}
+
+model ContentSection {
+  id                 String           @id @default(uuid())
+  key                String           @unique
+  title              String
+  subtitle           String?
+  data               Json
+  isPublished        Boolean          @default(true)
+  publishedAt        DateTime?
+  scheduledPublishAt DateTime?
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+  versions           ContentVersion[]
+
+  @@map("content_sections")
+}
+
+model ContentVersion {
+  id            String         @id @default(uuid())
+  sectionId     String
+  versionNumber Int
+  title         String
+  data          Json
+  changeNote    String?
+  publishedBy   String?
+  createdAt     DateTime       @default(now())
+  section       ContentSection @relation(fields: [sectionId], references: [id], onDelete: Cascade)
+
+  @@unique([sectionId, versionNumber])
+  @@map("content_versions")
+}
+
+model MediaAsset {
+  id         String   @id @default(uuid())
+  fileName   String
+  fileUrl    String
+  mimeType   String
+  sizeBytes  Int
+  altText    String
+  width      Int?
+  height     Int?
+  focusX     Float    @default(50.0)
+  focusY     Float    @default(50.0)
+  uploadedBy String?
+  // Upload purpose (DOCUMENT, ID_PROOF, TEAM_LOGO, CMS_BACKGROUND, ...) and visibility.
+  // Private (isPublic=false) files are only served via signed URLs issued to the uploader/staff.
+  purpose    String?
+  isPublic   Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  @@index([fileUrl])
+  @@index([uploadedBy])
+  @@map("media_assets")
+}
+
+model Prize {
+  id          String   @id @default(uuid())
+  category    String   // "D40" | "D20" | "UNALLOCATED"
+  rank        Int?
+  title       String
+  amount      Float
+  currency    String   @default("INR")
+  isConfirmed Boolean  @default(true)
+  notes       String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@map("prizes")
+}
+
+model Event {
+  id           String      @id @default(uuid())
+  slug         String      @unique
+  title        String
+  subtitle     String?
+  description  String?
+  bannerUrl    String?
+  startDate    DateTime
+  endDate      DateTime
+  venueName    String
+  venueAddress String?
+  status       String      @default("UPCOMING")
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+  categories   Category[]
+  arenas       Arena[]
+  sponsors     Sponsor[]
+
+  @@map("events")
+}
+
+model Category {
+  id                   String         @id @default(uuid())
+  eventId              String
+  slug                 String
+  name                 String
+  minTeamSize          Int            @default(5)
+  maxTeamSize          Int            @default(8)
+  entryFee             Float          @default(0)
+  currency             String         @default("INR")
+  technicalSpecsSchema Json?
+  rulesPdfUrl          String?
+  isActive             Boolean        @default(true)
+  event                Event          @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  teams                Team[]
+  registrations        Registration[]
+  fixtures             Fixture[]
+
+  @@unique([eventId, slug])
+  @@map("categories")
+}
+
+model Team {
+  id               String         @id @default(uuid())
+  categoryId       String
+  name             String
+  code             String         @unique
+  logoUrl          String?
+  captainId        String
+  institutionName  String
+  city             String
+  country          String         @default("India")
+  isApprovedPublic Boolean        @default(false)
+  createdAt        DateTime       @default(now())
+  category         Category       @relation(fields: [categoryId], references: [id])
+  captain          User           @relation("TeamCaptain", fields: [captainId], references: [id])
+  members          TeamMember[]
+  registrations    Registration[]
+  fixturesAsTeam1  Fixture[]      @relation("FixtureTeam1")
+  fixturesAsTeam2  Fixture[]      @relation("FixtureTeam2")
+
+  @@index([categoryId])
+  @@index([captainId])
+  // One team per captain: unique index "teams_one_team_per_captain" (raw SQL, migration
+  // 20261016000000_team_one_per_captain); not @unique so User.teamsLed stays a one-to-many relation.
+  @@index([isApprovedPublic])
+  @@map("teams")
+}
+
+model TeamMember {
+  id         String   @id @default(uuid())
+  teamId     String
+  userId     String?
+  fullName   String
+  email      String
+  mobile     String?
+  memberRole String   @default("TEAM_MEMBER")
+  idProofUrl String?
+  status     String   @default("PENDING")
+  createdAt  DateTime @default(now())
+  team       Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  user       User?    @relation(fields: [userId], references: [id])
+
+  @@index([teamId])
+  @@index([userId])
+  @@index([idProofUrl])
+  @@map("team_members")
+}
+
+model Registration {
+  id               String                @id @default(uuid())
+  registrationCode String                @unique
+  teamId           String
+  categoryId       String
+  status           RegistrationStatus    @default(SUBMITTED)
+  submittedAt      DateTime              @default(now())
+  approvedAt       DateTime?
+  team             Team                  @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  category         Category              @relation(fields: [categoryId], references: [id])
+  documents        Document[]
+  payments         Payment[]
+  inspections      TechnicalInspection[]
+  certificates     Certificate[]
+
+  @@unique([teamId, categoryId])
+  @@index([teamId])
+  @@index([categoryId])
+  @@index([status])
+  @@map("registrations")
+}
+
+model Document {
+  id             String         @id @default(uuid())
+  registrationId String
+  type           String
+  fileName       String?
+  fileUrl        String
+  status         DocumentStatus @default(PENDING)
+  feedback       String?
+  uploadedAt     DateTime       @default(now())
+  registration   Registration   @relation(fields: [registrationId], references: [id], onDelete: Cascade)
+
+  @@index([registrationId, status])
+  @@index([fileUrl])
+  @@map("documents")
+}
+
+model Payment {
+  id               String        @id @default(uuid())
+  registrationId   String
+  orderId          String        @unique
+  paymentId        String?
+  amount           Float
+  currency         String        @default("INR")
+  status           PaymentStatus @default(PENDING)
+  baseAmount       Float?
+  gstRate          Float?        @default(18)
+  gstAmount        Float?
+  refundId         String?
+  refundStatus     String?
+  refundReason     String?
+  refundedAt       DateTime?
+  gateway          String        @default("RAZORPAY")
+  gatewaySignature String?
+  paidAt           DateTime?
+  createdAt        DateTime      @default(now())
+  registration     Registration  @relation(fields: [registrationId], references: [id], onDelete: Cascade)
+
+  @@index([registrationId, status])
+  @@index([status, createdAt])
+  @@map("payments")
+}
+
+model TechnicalInspection {
+  id                 String           @id @default(uuid())
+  registrationId     String
+  inspectorId        String?
+  weightGrams        Float
+  diameterMm         Float
+  failsafeLatencySec Float
+  checks             Json?
+  status             InspectionStatus @default(PASSED)
+  notes              String?
+  inspectedAt        DateTime         @default(now())
+  registration       Registration     @relation(fields: [registrationId], references: [id], onDelete: Cascade)
+
+  @@index([registrationId])
+  @@map("technical_inspections")
+}
+
+model Arena {
+  id          String    @id @default(uuid())
+  eventId     String
+  name        String
+  code        String    @unique
+  description String?
+  event       Event     @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  fixtures    Fixture[]
+
+  @@map("arenas")
+}
+
+model Fixture {
+  id             String       @id @default(uuid())
+  categoryId     String
+  arenaId        String
+  matchNumber    Int
+  stage          MatchStage   @default(QUALIFIER)
+  team1Id        String
+  team2Id        String
+  team1Score     Int          @default(0)
+  team2Score     Int          @default(0)
+  currentSet     Int          @default(1)
+  winnerId       String?
+  status         MatchStatus  @default(SCHEDULED)
+  scheduledStart DateTime?
+  createdAt      DateTime     @default(now())
+  arena          Arena        @relation(fields: [arenaId], references: [id])
+  category       Category     @relation(fields: [categoryId], references: [id])
+  team1          Team         @relation("FixtureTeam1", fields: [team1Id], references: [id])
+  team2          Team         @relation("FixtureTeam2", fields: [team2Id], references: [id])
+  events         MatchEvent[]
+
+  @@index([categoryId])
+  @@index([arenaId])
+  @@index([status])
+  @@map("fixtures")
+}
+
+model MatchEvent {
+  id         String   @id @default(uuid())
+  fixtureId  String
+  teamId     String
+  timestamp  DateTime @default(now())
+  eventType  String
+  scoreDelta Int      @default(1)
+  notes      String?
+  fixture    Fixture  @relation(fields: [fixtureId], references: [id], onDelete: Cascade)
+
+  @@index([fixtureId, timestamp])
+  @@map("match_events")
+}
+
+model Sponsor {
+  id           String   @id @default(uuid())
+  eventId      String
+  name         String
+  /// TITLE | PLATINUM | GOLD | SILVER | PARTNER | ACADEMIC | MEDIA
+  tier         String
+  logoUrl      String?
+  websiteUrl   String?
+  description  String?
+  /// Where the sponsor is shown on the public site: HOME | EVENT | FOOTER
+  placements   String[] @default(["HOME", "EVENT", "FOOTER"])
+  isActive     Boolean  @default(true)
+  displayOrder Int      @default(0)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  event        Event    @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@index([isActive, displayOrder])
+  @@map("sponsors")
+}
+
+model GalleryImage {
+  id           String   @id @default(uuid())
+  imageUrl     String
+  title        String
+  caption      String?
+  altText      String
+  category     String?
+  isPublished  Boolean  @default(true)
+  displayOrder Int      @default(0)
+  width        Int?
+  height       Int?
+  uploadedBy   String?
+  mediaAssetId String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([isPublished, displayOrder])
+  @@index([imageUrl])
+  @@map("gallery_images")
+}
+
+model Certificate {
+  id                String       @id @default(uuid())
+  code              String       @unique
+  registrationId    String
+  recipientName     String
+  teamName          String
+  achievementTitle  String
+  issuedDate        DateTime     @default(now())
+  pdfUrl            String?
+  qrVerificationUrl String
+  registration      Registration @relation(fields: [registrationId], references: [id], onDelete: Cascade)
+
+  @@index([registrationId])
+  @@map("certificates")
+}
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  actorId    String?
+  actorEmail String?
+  actorRole  String?
+  action     String
+  entityType String
+  entityId   String?
+  beforeState Json?
+  afterState  Json?
+  ipAddress  String?
+  userAgent  String?
+  createdAt  DateTime @default(now())
+  /// Tamper-evidence hash chain (apps/api/src/audit/audit-chain.ts): position in the chain, the previous
+  /// row's hash and sha256(prevHash + canonical row JSON). Null on rows written before the chain existed.
+  chainSeq   Int?     @unique
+  prevHash   String?  @db.VarChar(64)
+  rowHash    String?  @db.VarChar(64)
+
+  @@index([createdAt])
+  @@index([entityType, entityId])
+  @@index([actorId])
+  @@map("audit_logs")
+}
+
+/// Home page sections managed from the staff console: one row per section key (hero, about, news, ...).
+/// `content` is validated per key by strict schemas (apps/api/src/cms/dto/home-content.schema.ts).
+model HomeSection {
+  key       String   @id @db.VarChar(64)
+  enabled   Boolean  @default(true)
+  sortOrder Int      @default(0)
+  content   Json
+  updatedBy String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([enabled, sortOrder])
+  @@map("home_sections")
+}
+
+model ProcessedWebhookEvent {
+  id              String   @id @default(uuid())
+  gatewayEventId  String   @unique
+  eventType       String
+  payloadSnapshot Json?
+  processedAt     DateTime @default(now())
+
+  @@index([gatewayEventId])
+  @@map("processed_webhook_events")
+}
+

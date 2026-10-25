@@ -1,0 +1,12 @@
+-- One team per captain account (security audit 2026-10, finding 9).
+-- TeamsService.createTeam checks for an existing team first; this unique index closes the race in
+-- which two concurrent requests both pass that check. A duplicate insert fails with P2002, which the
+-- service maps to 409 Conflict.
+--
+-- Kept as a raw index (like idx_payments_one_pending_per_registration) rather than @unique on
+-- Team.captainId: @unique would turn the User.teamsLed relation into a one-to-one relation and change
+-- the generated client types used by the auth module.
+--
+-- The migration fails (and nothing is changed) if a captain already has more than one team; resolve
+-- such duplicates manually before deploying.
+CREATE UNIQUE INDEX IF NOT EXISTS "teams_one_team_per_captain" ON "teams" ("captainId");

@@ -1,0 +1,59 @@
+# Dependabot: weekly dependency, base-image and GitHub Actions updates.
+# Security updates (Dependabot alerts) are raised immediately regardless of schedule;
+# enable "Dependabot security updates" in the repository settings.
+version: 2
+updates:
+  # npm workspaces (root lockfile covers apps/* and packages/*)
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "04:00"
+      timezone: Asia/Kolkata
+    open-pull-requests-limit: 10
+    labels: [dependencies, security]
+    groups:
+      npm-minor-and-patch:
+        update-types: [minor, patch]
+
+  # Dockerfiles (digest-pinned node base images)
+  - package-ecosystem: docker
+    directories:
+      - /apps/api
+      - /apps/web
+      - /apps/admin
+      - /infra/backup
+    schedule:
+      interval: weekly
+      day: monday
+      time: "04:00"
+      timezone: Asia/Kolkata
+    labels: [dependencies, docker]
+
+  # Images in docker-compose.prod.yml and docker-compose.yml (nginx, postgres, redis,
+  # clamav, certbot), pinned as tag@sha256 digest: Dependabot bumps the digest too.
+  # The CI service containers in .github/workflows/ci-cd.yml (postgres, redis) are
+  # not covered by any ecosystem: copy the new digest there when merging the bump
+  # (tests/infra-hardening.spec.ts fails while they differ).
+  - package-ecosystem: docker-compose
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "04:00"
+      timezone: Asia/Kolkata
+    labels: [dependencies, docker]
+
+  # GitHub Actions (keeps the commit-SHA pins and their version comments current)
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "04:00"
+      timezone: Asia/Kolkata
+    labels: [dependencies, ci]
+    groups:
+      github-actions:
+        patterns: ["*"]

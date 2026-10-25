@@ -1,0 +1,48 @@
+# ==============================================================================
+# Root build-context ignore file. All Dockerfiles build with context "." (repo root)
+# (see docker-compose.prod.yml and .github/workflows/ci-cd.yml), so this file applies
+# to every image. Keeps host node_modules / build output / secrets out of images.
+# ==============================================================================
+
+# Dependencies & build output (must be produced inside the image, never copied from host)
+node_modules
+**/node_modules
+**/.next
+**/dist
+**/out
+**/build
+**/*.tsbuildinfo
+**/.turbo
+
+# Secrets
+.env
+.env.*
+**/.env
+**/.env.*
+!**/.env.example
+*.pem
+
+# Runtime data (anchored: **/uploads would also drop the source module apps/api/src/uploads)
+uploads
+apps/api/uploads
+storage
+apps/api/storage
+infra/backups
+**/*.dump
+**/*.dump.enc
+
+# VCS, CI, editor, tests, docs artifacts
+.git
+.github
+.claude
+.idea
+.vscode
+tests
+coverage
+**/coverage
+test-results
+playwright-report
+*.png
+*.log
+**/*.log
+docker-compose*.yml

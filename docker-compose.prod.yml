@@ -1,0 +1,708 @@
+# ==============================================================================
+# GCDIS production stack
+#
+#   docker compose -f docker-compose.prod.yml up -d          (build locally or pull)
+#   docker compose -f docker-compose.prod.yml pull && ... up -d   (CI images, see scripts/deploy.sh)
+#
+# Images: IMAGE_PREFIX / IMAGE_TAG select pre-built images (e.g. pushed to GHCR by
+# .github/workflows/ci-cd.yml). Without them, `build:` produces local/gcdis-*:latest.
+# All secrets come from .env (see .env.example); `:?` makes compose refuse to start
+# when one is missing.
+#
+# Container hardening (docs/security/production-checklist.md):
+#   * every service: no-new-privileges, cap_drop ALL (only the capabilities a service
+#     demonstrably needs are added back), CPU / memory / PID limits;
+#   * read-only root filesystem with tmpfs for the paths a service writes to;
+#   * application images run as the non-root `node` user;
+#   * networks: only the proxy publishes ports. PostgreSQL, Redis and ClamAV sit on
+#     `gcdis-data`, an internal network with no route to the internet; only the
+#     services that need them join it. `gcdis-egress` gives outbound access to the
+#     few services that need it (signature updates, S3 backups, ACME).
+#
+# Third-party images are pinned as `tag@sha256:<multi-arch index digest>` (the tag is
+# kept for readability; the digest is what Docker pulls). Dependabot's docker-compose
+# ecosystem (.github/dependabot.yml) raises PRs that bump the digests.
+# ==============================================================================
+
+# Log rotation for every service (json-file, at most 5 x 10 MB per container), so a
+# chatty or attacked container can never fill the host disk. Ship logs elsewhere for
+# long-term retention (docs/security/production-checklist.md, section 9).
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+x-hardening: &hardening
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+
+x-app-hardening: &app-hardening
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  read_only: true
+
+services:
+  # 0. SSL Bootstrap Service (creates a temporary self-signed cert ONLY if none exists,
+  #    so nginx can start and serve the ACME challenge; see infra/ssl/issue-certs.sh)
+  #    Runs from the locally built backup image, which already contains openssl, so it
+  #    needs neither network access nor package installation.
+  cert_init:
+    image: gcdis-backup:local
+    build:
+      context: ./infra/backup
+    container_name: gcdis-cert-init
+    <<: *app-hardening
+    logging: *default-logging
+    network_mode: none
+    tmpfs:
+      - /tmp
+    environment:
+      CERT_NAME: gcdis.in
+    volumes:
+      - ./infra/ssl/init-certs.sh:/scripts/init-certs.sh:ro
+      - certbot_certs:/etc/nginx/ssl
+    entrypoint: ["sh", "/scripts/init-certs.sh"]
+    restart: "no"
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 128M
+          pids: 64
+
+  # 1. Reverse Proxy (The ONLY service exposing public ports 80/443)
+  #    Reloads every 6h so certificates renewed by the certbot service are picked up.
+  #    The master process runs as root only to bind 80/443 and read the private key;
+  #    workers run as `nginx` (user directive). Verified with exactly these
+  #    capabilities and a read-only root filesystem.
+  proxy:
+    image: nginx:1.28-alpine@sha256:a8b39bd9cf0f83869a2162827a0caf6137ddf759d50a171451b335cecc87d236
+    container_name: gcdis-proxy
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    <<: *app-hardening
+    logging: *default-logging
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+      - NET_BIND_SERVICE
+    tmpfs:
+      - /var/cache/nginx
+      - /tmp
+    volumes:
+      - ./infra/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./infra/nginx/security-headers.conf:/etc/nginx/security-headers.conf:ro
+      - ./infra/nginx/proxy-params.conf:/etc/nginx/proxy-params.conf:ro
+      - ./infra/nginx/proxy-hide-headers.conf:/etc/nginx/proxy-hide-headers.conf:ro
+      - ./infra/nginx/well-known.conf:/etc/nginx/well-known.conf:ro
+      - ./infra/nginx/admin-allowlist.conf:/etc/nginx/admin-allowlist.conf:ro
+      - ./infra/nginx/security.txt:/etc/nginx/well-known/security.txt:ro
+      - certbot_certs:/etc/nginx/ssl:ro
+      - certbot_www:/var/www/certbot:ro
+    command:
+      - /bin/sh
+      - -c
+      - |
+        (while :; do sleep 6h; nginx -s reload; done) &
+        exec nginx -g 'daemon off;'
+    depends_on:
+      cert_init:
+        condition: service_completed_successfully
+      web:
+        condition: service_healthy
+      admin:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+    healthcheck:
+      # nginx:alpine ships busybox wget, not curl
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/healthz || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+          pids: 256
+    networks:
+      - gcdis-internal
+
+  # 2. Public Institutional Website & Team Portal (Next.js Standalone, Non-Root)
+  web:
+    image: ${IMAGE_PREFIX:-local}/gcdis-web:${IMAGE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-https://api.gcdis.in/api}
+        NEXT_PUBLIC_WS_URL: ${NEXT_PUBLIC_WS_URL:-wss://api.gcdis.in}
+        NEXT_PUBLIC_SITE_URL: ${NEXT_PUBLIC_SITE_URL:-https://www.gcdis.in}
+    container_name: gcdis-web
+    restart: always
+    <<: *app-hardening
+    logging: *default-logging
+    tmpfs:
+      - /tmp
+      - /app/apps/web/.next/cache
+    environment:
+      - NODE_ENV=production
+      # Server-side rendering calls the API over the internal network instead of the public internet
+      # (no hairpin through nginx; SSR traffic does not share one public IP against the API rate limits)
+      - API_INTERNAL_URL=http://gcdis-api:4000/api
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          cpus: '1.5'
+          memory: 1024M
+          pids: 512
+    networks:
+      - gcdis-internal
+
+  # 3. Dedicated Staff Admin Console (Next.js Standalone, Non-Root)
+  admin:
+    image: ${IMAGE_PREFIX:-local}/gcdis-admin:${IMAGE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: apps/admin/Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-https://api.gcdis.in/api}
+        NEXT_PUBLIC_WS_URL: ${NEXT_PUBLIC_WS_URL:-wss://api.gcdis.in}
+        NEXT_PUBLIC_SITE_URL: ${NEXT_PUBLIC_SITE_URL:-https://www.gcdis.in}
+    container_name: gcdis-admin
+    restart: always
+    <<: *app-hardening
+    logging: *default-logging
+    tmpfs:
+      - /tmp
+      - /app/apps/admin/.next/cache
+    environment:
+      - NODE_ENV=production
+      # Trusted Types: empty = enforced in production; "report-only" = emergency fallback (see .env.example)
+      - ADMIN_TRUSTED_TYPES=${ADMIN_TRUSTED_TYPES:-}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3001/"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          cpus: '1.5'
+          memory: 1024M
+          pids: 512
+    networks:
+      - gcdis-internal
+
+  # 4a. One-shot database migration job (runs as migration owner gcdis_admin).
+  #     Uses the API `builder` stage, which contains the prisma CLI (devDependency).
+  #     After migrate deploy it (re)applies idempotent table-level grants and default
+  #     privileges (infra/postgres/post-migrate-grants.sql). The API never runs migrations.
+  migrate:
+    image: ${IMAGE_PREFIX:-local}/gcdis-api-migrate:${IMAGE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+      target: builder
+    container_name: gcdis-migrate
+    restart: "no"
+    <<: *app-hardening
+    logging: *default-logging
+    tmpfs:
+      - /tmp
+    working_dir: /app/apps/api
+    environment:
+      - NODE_ENV=production
+      - HOME=/tmp
+      - npm_config_cache=/tmp/.npm
+      - DATABASE_URL=postgresql://${POSTGRES_ADMIN_USER:-gcdis_admin}:${POSTGRES_ADMIN_PASSWORD:?POSTGRES_ADMIN_PASSWORD must be provided}@postgres:5432/${POSTGRES_DB:?POSTGRES_DB must be provided}?schema=public
+    volumes:
+      - ./infra/postgres/post-migrate-grants.sql:/infra/post-migrate-grants.sql:ro
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        echo "[migrate] prisma migrate deploy"
+        npx --no-install prisma migrate deploy --schema prisma/schema.prisma
+        echo "[migrate] applying post-migration grants"
+        npx --no-install prisma db execute --schema prisma/schema.prisma --file /infra/post-migrate-grants.sql
+        echo "[migrate] done"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1024M
+          pids: 256
+    networks:
+      - gcdis-data
+
+  # 4b. First-run super admin provisioning (manual, opt-in profile):
+  #     docker compose -f docker-compose.prod.yml --profile bootstrap run --rm bootstrap-admin
+  #     Reads SUPER_ADMIN_EMAIL / SUPER_ADMIN_TEMP_PASSWORD (apps/api/prisma/bootstrap-admin.ts).
+  #     Remove SUPER_ADMIN_TEMP_PASSWORD from .env afterwards.
+  bootstrap-admin:
+    image: ${IMAGE_PREFIX:-local}/gcdis-api-migrate:${IMAGE_TAG:-latest}
+    profiles: ["bootstrap"]
+    restart: "no"
+    <<: *app-hardening
+    logging: *default-logging
+    tmpfs:
+      - /tmp
+    working_dir: /app/apps/api
+    environment:
+      - NODE_ENV=production
+      - HOME=/tmp
+      - DATABASE_URL=postgresql://${POSTGRES_APP_USER:-gcdis_app}:${POSTGRES_APP_PASSWORD:?POSTGRES_APP_PASSWORD must be provided}@postgres:5432/${POSTGRES_DB:?POSTGRES_DB must be provided}?schema=public
+      - SUPER_ADMIN_EMAIL=${SUPER_ADMIN_EMAIL:-}
+      - SUPER_ADMIN_TEMP_PASSWORD=${SUPER_ADMIN_TEMP_PASSWORD:-}
+    command: ["npx", "--no-install", "ts-node", "--transpile-only", "prisma/bootstrap-admin.ts"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    networks:
+      - gcdis-data
+
+  # 4. Core NestJS API Engine (Non-Root, Persistent Uploads Volume, least-privilege DB role)
+  #    gcdis-internal: reached by the proxy, outbound HTTPS/SMTP (Razorpay, Google,
+  #    HIBP, mail relay, alert webhook). gcdis-data: PostgreSQL, Redis, ClamAV.
+  api:
+    image: ${IMAGE_PREFIX:-local}/gcdis-api:${IMAGE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+      target: runner
+    container_name: gcdis-api
+    restart: always
+    <<: *app-hardening
+    logging: *default-logging
+    tmpfs:
+      - /tmp
+    environment:
+      - NODE_ENV=production
+      - PORT=4000
+      - DATABASE_URL=postgresql://${POSTGRES_APP_USER:-gcdis_app}:${POSTGRES_APP_PASSWORD:?POSTGRES_APP_PASSWORD must be provided}@postgres:5432/${POSTGRES_DB:?POSTGRES_DB must be provided}?schema=public
+      - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be provided}@redis:6379
+      - JWT_SECRET=${JWT_SECRET:?JWT_SECRET must be provided}
+      # Optional and currently unused (refresh tokens are opaque, hashed DB records)
+      - JWT_REFRESH_SECRET=${JWT_REFRESH_SECRET:-}
+      - JWT_ADMIN_SECRET=${JWT_ADMIN_SECRET:?JWT_ADMIN_SECRET must be provided}
+      - TWO_FACTOR_ENCRYPTION_KEY=${TWO_FACTOR_ENCRYPTION_KEY:?TWO_FACTOR_ENCRYPTION_KEY must be provided}
+      - PASS_SIGNING_SECRET=${PASS_SIGNING_SECRET:?PASS_SIGNING_SECRET must be provided}
+      - UPLOAD_SIGNING_SECRET=${UPLOAD_SIGNING_SECRET:?UPLOAD_SIGNING_SECRET must be provided}
+      # Abuse limits (defaults shown); raise API_DEFAULT_RATE_LIMIT_PER_MIN if many users share one IP (campus NAT)
+      - API_DEFAULT_RATE_LIMIT_PER_MIN=${API_DEFAULT_RATE_LIMIT_PER_MIN:-300}
+      - WS_MAX_CONNECTIONS_PER_IP=${WS_MAX_CONNECTIONS_PER_IP:-20}
+      - WS_MAX_ROOMS_PER_SOCKET=${WS_MAX_ROOMS_PER_SOCKET:-10}
+      - COOKIE_SECRET=${COOKIE_SECRET:?COOKIE_SECRET must be provided}
+      - STORAGE_LOCAL_DIR=/app/apps/api/uploads
+      # Encrypted invoice/pass PDF cache on its own writable volume (the root filesystem is read-only)
+      - PDF_CACHE_DIR=/app/apps/api/storage
+      # AES-256-GCM at-rest encryption of private uploads (64 hex chars); the API refuses to start without it
+      - FILE_ENCRYPTION_KEY=${FILE_ENCRYPTION_KEY:?FILE_ENCRYPTION_KEY must be provided}
+      # Upload malware scanning: the bundled `clamav` service (internal network only).
+      # With CLAMAV_REQUIRED=true uploads are refused (503) while clamd is unreachable.
+      - CLAMAV_HOST=clamav
+      - CLAMAV_PORT=3310
+      - CLAMAV_REQUIRED=${CLAMAV_REQUIRED:-true}
+      # Championship hero video upload limit in MB (nginx /api/uploads/stream allows 64M, clamd 70M)
+      - UPLOAD_VIDEO_MAX_MB=${UPLOAD_VIDEO_MAX_MB:-60}
+      # Outgoing email (verification / password reset / security alerts). The API
+      # refuses to start in production without SMTP_HOST and MAIL_FROM.
+      - SMTP_HOST=${SMTP_HOST:?SMTP_HOST must be provided}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USER=${SMTP_USER:-}
+      - SMTP_PASSWORD=${SMTP_PASSWORD:-}
+      - SMTP_SECURE=${SMTP_SECURE:-false}
+      - MAIL_FROM=${MAIL_FROM:?MAIL_FROM must be provided}
+      - SMTP_REQUIRE_TLS=${SMTP_REQUIRE_TLS:-true}
+      # Encrypts pending email verification codes (staff reveal); required in production
+      - VERIFICATION_CODE_KEY=${VERIFICATION_CODE_KEY:?VERIFICATION_CODE_KEY must be provided}
+      # Breached-password check (Have I Been Pwned k-anonymity range API)
+      - HIBP_CHECK=${HIBP_CHECK:-true}
+      # Optional security alert channels (https webhook and/or email address)
+      - SECURITY_ALERT_WEBHOOK_URL=${SECURITY_ALERT_WEBHOOK_URL:-}
+      - SECURITY_ALERT_EMAIL=${SECURITY_ALERT_EMAIL:-}
+      - PUBLIC_SITE_URL=${PUBLIC_SITE_URL:-https://www.gcdis.in}
+      - ADMIN_SITE_URL=${ADMIN_SITE_URL:-https://admin.gcdis.in}
+      # Optional staff console hardening (see .env.example)
+      - ADMIN_SESSION_MAX_HOURS=${ADMIN_SESSION_MAX_HOURS:-12}
+      - ADMIN_IP_ALLOWLIST=${ADMIN_IP_ALLOWLIST:-}
+      - ADMIN_IDLE_TIMEOUT_MIN=${ADMIN_IDLE_TIMEOUT_MIN:-30}
+      - ADMIN_MAX_SESSIONS=${ADMIN_MAX_SESSIONS:-3}
+      - 'ADMIN_LOGOUT_CLEAR_SITE_DATA=${ADMIN_LOGOUT_CLEAR_SITE_DATA:-"cache", "storage"}'
+      - RAZORPAY_KEY_ID=${RAZORPAY_KEY_ID:?RAZORPAY_KEY_ID must be provided}
+      - RAZORPAY_KEY_SECRET=${RAZORPAY_KEY_SECRET:?RAZORPAY_KEY_SECRET must be provided}
+      - RAZORPAY_WEBHOOK_SECRET=${RAZORPAY_WEBHOOK_SECRET:?RAZORPAY_WEBHOOK_SECRET must be provided}
+      # Optional: Sign in with Google is disabled when GOOGLE_CLIENT_ID is empty
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
+      # Optional: tax identifiers printed on GST invoices (omitted from the invoice when empty)
+      - INVOICE_GSTIN=${INVOICE_GSTIN:-}
+      - INVOICE_PAN=${INVOICE_PAN:-}
+      - GOOGLE_ALLOWED_HOSTED_DOMAINS=${GOOGLE_ALLOWED_HOSTED_DOMAINS:-}
+    volumes:
+      - uploads_prod_data:/app/apps/api/uploads
+      - pdf_cache_data:/app/apps/api/storage
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      # Started, not healthy: a ClamAV outage must only block uploads (fail closed
+      # via CLAMAV_REQUIRED), never take the whole API down.
+      clamav:
+        condition: service_started
+    healthcheck:
+      # /api/health answers 503 while PostgreSQL or Redis is unreachable; `curl -f`
+      # exits non-zero on any HTTP status >= 400, so the container turns unhealthy.
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://localhost:4000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2048M
+          pids: 512
+    networks:
+      - gcdis-internal
+      - gcdis-data
+
+  # 5. PostgreSQL Database (internal-only network; ZERO host port exposure)
+  #    init-roles.sh runs once on an empty data dir: creates gcdis_admin (migrations),
+  #    gcdis_app (runtime DML) and gcdis_backup (read-only) roles. It is idempotent and
+  #    may be re-run: docker compose -f docker-compose.prod.yml exec postgres \
+  #      sh /docker-entrypoint-initdb.d/init-roles.sh
+  #    Capabilities: the entrypoint (root) fixes ownership of the data/socket dirs and
+  #    then drops to the `postgres` user.
+  postgres:
+    image: postgres:16-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+    container_name: gcdis-postgres
+    restart: always
+    <<: *app-hardening
+    logging: *default-logging
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETUID
+      - SETGID
+    tmpfs:
+      - /tmp
+      - /var/run/postgresql
+    shm_size: 256m
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be provided}
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB must be provided}
+      POSTGRES_APP_PASSWORD: ${POSTGRES_APP_PASSWORD:?POSTGRES_APP_PASSWORD must be provided}
+      POSTGRES_ADMIN_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:?POSTGRES_ADMIN_PASSWORD must be provided}
+      POSTGRES_BACKUP_PASSWORD: ${POSTGRES_BACKUP_PASSWORD:?POSTGRES_BACKUP_PASSWORD must be provided}
+      # scram-sha-256 for every TCP connection (the image default for initdb >= 14,
+      # pinned explicitly so it can never silently fall back to md5/trust)
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
+    volumes:
+      - postgres_prod_data:/var/lib/postgresql/data
+      - ./infra/postgres/init-roles.sh:/docker-entrypoint-initdb.d/init-roles.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2048M
+          pids: 256
+    networks:
+      - gcdis-data
+
+  # 6. Redis Session & Real-Time Cache (Internal network only, password auth)
+  #    The password is written to a 0600 config file at start-up (requirepass), so it
+  #    never appears in the redis-server argv; the healthcheck authenticates via the
+  #    REDISCLI_AUTH env var instead of `redis-cli -a <password>`.
+  #    Use an alphanumeric/hex REDIS_PASSWORD (it is also embedded in REDIS_URL).
+  redis:
+    image: redis:7.4-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499
+    container_name: gcdis-redis
+    restart: always
+    <<: *app-hardening
+    logging: *default-logging
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+    tmpfs:
+      - /tmp
+    environment:
+      REDISCLI_AUTH: ${REDIS_PASSWORD:?REDIS_PASSWORD must be provided}
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        umask 077
+        printf 'requirepass "%s"\n' "$$REDISCLI_AUTH" > /tmp/redis.conf
+        chown redis:redis /tmp/redis.conf
+        exec docker-entrypoint.sh redis-server /tmp/redis.conf
+    volumes:
+      - redis_prod_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+          pids: 128
+    networks:
+      - gcdis-data
+
+  # 6b. ClamAV daemon for upload malware scanning (official image; clamd INSTREAM on
+  #     3310, reachable only from gcdis-data - never published). freshclam refreshes
+  #     signatures through gcdis-egress; they persist in the clamav_db volume (seeded
+  #     from the image on first start). clamd needs ~1.2 GB and briefly about twice
+  #     that while reloading signatures, hence the 3 GB limit.
+  #     Verified: hardened exactly like this, clamd answers PING and flags EICAR.
+  clamav:
+    # Debian variant: the official multi-architecture ClamAV image (amd64 + arm64), so the stack also runs on
+    # ARM servers such as Oracle Cloud Always Free (Ampere A1). The Alpine `clamav/clamav` image is amd64 only.
+    image: clamav/clamav-debian:1.4@sha256:1d4083fccfcd485cdaeee593db7655c923afdb8ed528e828d03e1c8b1e351bec
+    container_name: gcdis-clamav
+    restart: always
+    <<: *app-hardening
+    logging: *default-logging
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETUID
+      - SETGID
+    tmpfs:
+      - /tmp
+      - /run
+      - /var/lock
+      - /var/log/clamav
+    environment:
+      # signature update checks per day
+      FRESHCLAM_CHECKS: "12"
+    volumes:
+      - clamav_db:/var/lib/clamav
+      - ./infra/clamav/clamd.conf:/etc/clamav/clamd.conf:ro
+    healthcheck:
+      test: ["CMD", "clamdcheck.sh"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 10m
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 3072M
+          pids: 128
+    networks:
+      - gcdis-data
+      - gcdis-egress
+
+  # 7. Automated Encrypted Off-Host Backup Service (database + uploads volume)
+  #    Image (infra/backup/Dockerfile) bakes in openssl + aws-cli and the restore tools
+  #    (restore.sh, verify-restore.sh); no apk at runtime.
+  #    Connects as the read-only gcdis_backup role. Runs as root without any
+  #    capability except DAC_READ_SEARCH (read uploads regardless of file mode).
+  backup:
+    build:
+      context: ./infra/backup
+    image: gcdis-backup:local
+    container_name: gcdis-db-backup
+    restart: always
+    <<: *app-hardening
+    logging: *default-logging
+    cap_add:
+      - DAC_READ_SEARCH
+    tmpfs:
+      - /tmp
+    environment:
+      HOME: /tmp
+      PGHOST: postgres
+      PGUSER: gcdis_backup
+      PGPASSWORD: ${POSTGRES_BACKUP_PASSWORD:?POSTGRES_BACKUP_PASSWORD required}
+      PGDATABASE: ${POSTGRES_DB:?POSTGRES_DB required}
+      BACKUP_ENCRYPTION_KEY: ${BACKUP_ENCRYPTION_KEY:?BACKUP_ENCRYPTION_KEY required}
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-14}
+      BACKUP_S3_BUCKET: ${BACKUP_S3_BUCKET:-}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_REGION: ${AWS_REGION:-ap-south-1}
+      UPLOADS_DIR: /uploads
+    volumes:
+      - ./infra/backups:/backups
+      - ./scripts/backup.sh:/scripts/backup.sh:ro
+      - uploads_prod_data:/uploads:ro
+    healthcheck:
+      # Unhealthy when the most recent run failed (marker written by backup-daemon.sh)
+      test: ["CMD-SHELL", "test ! -f /backups/.last_failure"]
+      interval: 5m
+      timeout: 5s
+      retries: 1
+    depends_on:
+      postgres:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+          pids: 128
+    networks:
+      - gcdis-data
+      - gcdis-egress
+
+  # 7b. Monthly restore drill (manual, opt-in profile; docs/security/backup-and-restore.md):
+  #       docker compose -f docker-compose.prod.yml --profile restore-drill run --rm restore-verify
+  #       docker compose -f docker-compose.prod.yml --profile restore-drill down   (removes the scratch DB)
+  #     Restores the newest backup into a throwaway PostgreSQL (tmpfs, no volume) and
+  #     compares row counts with the live database. Never writes to production.
+  restore-scratch:
+    image: postgres:16-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+    profiles: ["restore-drill"]
+    restart: "no"
+    <<: *app-hardening
+    logging: *default-logging
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETUID
+      - SETGID
+    tmpfs:
+      - /tmp
+      - /var/run/postgresql
+      - /var/lib/postgresql/data
+    environment:
+      POSTGRES_USER: drill
+      POSTGRES_PASSWORD: ${RESTORE_DRILL_PASSWORD:-${POSTGRES_BACKUP_PASSWORD:?POSTGRES_BACKUP_PASSWORD required}}
+      POSTGRES_DB: postgres
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U drill -d postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1024M
+    networks:
+      - gcdis-data
+
+  restore-verify:
+    image: gcdis-backup:local
+    profiles: ["restore-drill"]
+    restart: "no"
+    <<: *app-hardening
+    logging: *default-logging
+    cap_add:
+      - DAC_READ_SEARCH
+    tmpfs:
+      - /tmp
+    entrypoint: ["/usr/local/bin/verify-restore.sh"]
+    command: []
+    environment:
+      HOME: /tmp
+      PGHOST: postgres
+      PGUSER: gcdis_backup
+      PGPASSWORD: ${POSTGRES_BACKUP_PASSWORD:?POSTGRES_BACKUP_PASSWORD required}
+      PGDATABASE: ${POSTGRES_DB:?POSTGRES_DB required}
+      BACKUP_ENCRYPTION_KEY: ${BACKUP_ENCRYPTION_KEY:?BACKUP_ENCRYPTION_KEY required}
+      RESTORE_PGHOST: restore-scratch
+      RESTORE_PGUSER: drill
+      RESTORE_PGPASSWORD: ${RESTORE_DRILL_PASSWORD:-${POSTGRES_BACKUP_PASSWORD:?POSTGRES_BACKUP_PASSWORD required}}
+    volumes:
+      - ./infra/backups:/backups:ro
+    depends_on:
+      restore-scratch:
+        condition: service_healthy
+    networks:
+      - gcdis-data
+
+  # 8. Certbot Automated Certificate Renewal (initial issuance: infra/ssl/issue-certs.sh)
+  #    Runs as root (owns the certificate volume) with no capabilities at all.
+  certbot:
+    image: certbot/certbot:v2.11.0@sha256:ddf9e5d226a56e886986838fa0ebedc0237511c78664352e8d0f4346ee022cd8
+    container_name: gcdis-certbot
+    restart: always
+    <<: *app-hardening
+    logging: *default-logging
+    tmpfs:
+      - /tmp
+      - /var/lib/letsencrypt
+      - /var/log/letsencrypt
+    volumes:
+      - certbot_certs:/etc/letsencrypt
+      - certbot_www:/var/www/certbot
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        trap exit TERM
+        while :; do
+          certbot renew --webroot -w /var/www/certbot --quiet || echo "[certbot] renew failed" >&2
+          sleep 12h & wait $${!}
+        done
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+          pids: 64
+    networks:
+      - gcdis-egress
+
+networks:
+  # proxy <-> web / admin / api, plus outbound for the API and SSR
+  gcdis-internal:
+    driver: bridge
+  # PostgreSQL / Redis / ClamAV: no route to or from the internet
+  gcdis-data:
+    driver: bridge
+    internal: true
+  # Outbound only (freshclam signature updates, S3 backup upload, ACME)
+  gcdis-egress:
+    driver: bridge
+
+volumes:
+  postgres_prod_data:
+  redis_prod_data:
+  uploads_prod_data:
+  pdf_cache_data:
+  certbot_certs:
+  certbot_www:
+  clamav_db:

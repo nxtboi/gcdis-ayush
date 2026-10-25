@@ -1,0 +1,77 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 210 20% 98%;
+    --foreground: 222 47% 11%;
+    --card: 0 0% 100%;
+    --card-foreground: 222 47% 11%;
+    --primary: 142 71% 45%;
+    --primary-foreground: 0 0% 100%;
+    --muted: 210 40% 96.1%;
+    --muted-foreground: 215.4 16.3% 46.9%;
+    --border: 214.3 31.8% 91.4%;
+    --input: 214.3 31.8% 91.4%;
+    --ring: 142 71% 45%;
+    --radius: 0.75rem;
+  }
+}
+
+body {
+  background-color: #F8FAFC;
+  color: #0F172A;
+  font-family: var(--font-sans), 'Inter', system-ui, -apple-system, sans-serif;
+  overflow-x: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background-color: #2563EB;
+  color: #FFFFFF;
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #F1F5F9;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #CBD5E1;
+  border-radius: 9999px;
+}
+
+.bg-topography {
+  background-color: #FAFAFA;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='800' height='800' viewBox='0 0 800 800'%3E%3Cpath d='M-100 200 C 150 100, 300 350, 500 220 C 700 90, 850 300, 1000 200' fill='none' stroke='%23E2E8F0' stroke-width='1.2' opacity='0.7'/%3E%3Cpath d='M-100 260 C 120 160, 320 410, 520 280 C 720 150, 820 360, 1000 260' fill='none' stroke='%23E2E8F0' stroke-width='1.2' opacity='0.6'/%3E%3Cpath d='M-100 320 C 100 220, 340 470, 540 340 C 740 210, 800 420, 1000 320' fill='none' stroke='%23E2E8F0' stroke-width='1.2' opacity='0.55'/%3E%3Cpath d='M-100 380 C 80 280, 360 530, 560 400 C 760 270, 780 480, 1000 380' fill='none' stroke='%23E2E8F0' stroke-width='1.2' opacity='0.5'/%3E%3Cpath d='M-100 440 C 60 340, 380 590, 580 460 C 780 330, 760 540, 1000 440' fill='none' stroke='%23E2E8F0' stroke-width='1.2' opacity='0.45'/%3E%3Cpath d='M-100 500 C 40 400, 400 650, 600 520 C 800 390, 740 600, 1000 500' fill='none' stroke='%23E2E8F0' stroke-width='1.2' opacity='0.4'/%3E%3Cpath d='M-100 560 C 20 460, 420 710, 620 580 C 820 450, 720 660, 1000 560' fill='none' stroke='%23E2E8F0' stroke-width='1.2' opacity='0.35'/%3E%3Cpath d='M-100 620 C 0 520, 440 770, 640 640 C 840 510, 700 720, 1000 620' fill='none' stroke='%23E2E8F0' stroke-width='1.2' opacity='0.3'/%3E%3C/svg%3E");
+  background-attachment: fixed;
+}
+
+/* Staff sign-in entrance: short rise, eased deceleration; disabled for reduced motion */
+@keyframes admin-rise {
+  from { opacity: 0; transform: translateY(14px); }
+  to { opacity: 1; transform: none; }
+}
+.admin-rise { animation: admin-rise 0.7s cubic-bezier(0.16, 1, 0.3, 1) both; }
+@media (prefers-reduced-motion: reduce) {
+  .admin-rise { animation: none; }
+}
+
+/* Loading placeholders: a slow, low-contrast shimmer; static for reduced motion */
+@keyframes admin-shimmer {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
+}
+.admin-skeleton {
+  background: linear-gradient(90deg, rgba(51, 65, 85, 0.35) 25%, rgba(71, 85, 105, 0.55) 50%, rgba(51, 65, 85, 0.35) 75%);
+  background-size: 200% 100%;
+  animation: admin-shimmer 1.6s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .admin-skeleton { animation: none; }
+}

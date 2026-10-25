@@ -1,0 +1,8 @@
+User-agent: *
+Allow: /
+Disallow: /api/
+Disallow: /portal
+Disallow: /live
+Disallow: /verify
+
+Sitemap: https://www.gcdis.in/sitemap.xml

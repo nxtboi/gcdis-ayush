@@ -1,0 +1,83 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Build and Caches
+.next/
+out/
+build/
+dist/
+*.tsbuildinfo
+.turbo
+
+# Environment and Secrets
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+apps/api/.env
+apps/public/.env
+apps/admin/.env
+apps/web/.env
+
+# Logs and Debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+*.log
+
+# OS and Editor
+.DS_Store
+Thumbs.db
+*.pem
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Test Coverage & Artifacts
+coverage/
+test-results/
+playwright-report/
+blob-report/
+playwright/.cache/
+
+# Prisma & Database local files
+*.sqlite
+*.sqlite3
+*.db
+
+# Runtime data (never commit user uploads, local storage, or DB backups).
+# Anchored to the runtime folders so source folders such as apps/api/src/uploads stay tracked.
+/uploads/
+/storage/
+apps/api/uploads/
+apps/api/storage/
+# Development email outbox (written when SMTP_HOST is empty outside production)
+apps/api/.mail-outbox/
+infra/backups/
+*.dump
+*.dump.enc
+*.dump.enc.hmac
+*.tar.gz.enc
+
+# Jest / test artifacts
+coverage/
+
+# Deploy state written by scripts/deploy.sh on the production host
+.deploy/
+
+# Local Claude Code session files
+.claude/
+
+# Internal QA and penetration-test reports: kept locally, never pushed
+FIX_REPORT.md
+TEST_REPORT.md
+docs/security/penetration-test-2026-10.md
+docs/security/pentest-checklist-owasp.md
+# Generated guides
+GCDIS-Website-Feature-Guide.pdf

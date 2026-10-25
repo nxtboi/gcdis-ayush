@@ -1,0 +1,52 @@
+{
+  "name": "gcdis-platform",
+  "version": "1.0.0",
+  "private": true,
+  "description": "GCDIS Official Platform - Institutional Website, Configurable Event Platform & Competition Management System",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "dev:shared": "npm run dev --prefix packages/shared",
+    "dev:api": "npm run dev --prefix apps/api",
+    "dev:web": "npm run dev --prefix apps/web",
+    "dev:admin": "npm run dev --prefix apps/admin",
+    "dev": "concurrently npm:dev:*",
+    "build": "npm run build --prefix packages/shared && npm run build --prefix apps/api && npm run build --prefix apps/web && npm run build --prefix apps/admin",
+    "start:api": "npm run start --prefix apps/api",
+    "start:web": "npm run start --prefix apps/web",
+    "start:admin": "npm run start --prefix apps/admin",
+    "start": "concurrently npm:start:*",
+    "test": "jest tests/ --runInBand",
+    "test:e2e": "npm run test --prefix tests/e2e",
+    "type-check": "npm run type-check --prefix packages/shared && npm run type-check --prefix apps/api && npm run type-check --prefix apps/web && npm run type-check --prefix apps/admin",
+    "db:seed": "ts-node apps/api/prisma/seed.ts",
+    "db:bootstrap-admin": "ts-node apps/api/prisma/bootstrap-admin.ts",
+    "db:seed:dev": "ts-node apps/api/prisma/seed-dev.ts",
+    "db:migrate": "prisma migrate deploy --schema=apps/api/prisma/schema.prisma",
+    "uploads:encrypt": "ts-node --transpile-only scripts/encrypt-existing-uploads.ts",
+    "test:infra": "jest tests/infra-cicd.spec.ts tests/repo-hygiene.spec.ts tests/backup-restore.spec.ts --runInBand"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.22.0",
+    "cookie-parser": "^1.4.7",
+    "helmet": "^7.1.0"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "jest": "^30.5.2",
+    "prisma": "^5.22.0",
+    "ts-jest": "^29.4.15",
+    "typescript": "^5.4.5"
+  },
+  "overrides": {
+    "next": {
+      ".": "^15.5.28",
+      "postcss": "^8.5.30"
+    },
+    "postcss": "^8.5.30",
+    "qs": "^6.16.0",
+    "file-type": "^21.3.4"
+  }
+}

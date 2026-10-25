@@ -1,0 +1,8 @@
+# ==============================================================================
+# Trivy accepted-risk list (used by .github/workflows/ci-cd.yml, trivyignores input).
+# One CVE id per line. Every entry MUST carry a justification and a review date;
+# remove it as soon as a fixed base image / package is available, e.g.:
+#   # CVE-2099-0001  busybox wget - not reachable in our images; review 2026-12-01
+#   CVE-2099-0001
+# Keep this file empty unless an exception has been reviewed.
+# ==============================================================================
