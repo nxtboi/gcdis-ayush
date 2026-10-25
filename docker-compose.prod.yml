@@ -494,7 +494,7 @@ services:
   clamav:
     # Debian variant: the official multi-architecture ClamAV image (amd64 + arm64), so the stack also runs on
     # ARM servers such as Oracle Cloud Always Free (Ampere A1). The Alpine `clamav/clamav` image is amd64 only.
-    image: clamav/clamav-debian:1.4@sha256:1d4083fccfcd485cdaeee593db7655c923afdb8ed528e828d03e1c8b1e351bec
+    image: clamav/clamav-debian:1.5@sha256:d7ede3cefeaf3b8a72ebcdee849d13f504bbca3f3b3cfade5bc7b6ee06a4f62c
     container_name: gcdis-clamav
     restart: always
     <<: *app-hardening
