@@ -18,7 +18,7 @@
     "@nestjs/jwt": "^11.0.2",
     "@nestjs/passport": "^11.0.5",
     "@nestjs/platform-express": "^11.2.7",
-    "@nestjs/platform-socket.io": "^11.2.7",
+    "@nestjs/platform-socket.io": "^12.2.0",
     "@nestjs/websockets": "^11.2.7",
     "@prisma/client": "^5.14.0",
     "bcryptjs": "^2.4.3",
