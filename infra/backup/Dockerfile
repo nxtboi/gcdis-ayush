@@ -9,7 +9,7 @@
 # Rebuild periodically to pick up security patches:
 #   docker compose -f docker-compose.prod.yml build --pull backup
 # ==============================================================================
-FROM postgres:16-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+FROM postgres:18-alpine@sha256:898c60cb390d1085bc97bdd6a1ae968757421df394b071848b52b1c09c89d6a5
 
 RUN apk add --no-cache openssl aws-cli tar
 
