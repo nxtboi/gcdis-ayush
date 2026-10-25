@@ -399,7 +399,7 @@ services:
   #    Capabilities: the entrypoint (root) fixes ownership of the data/socket dirs and
   #    then drops to the `postgres` user.
   postgres:
-    image: postgres:16-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+    image: postgres:18-alpine@sha256:898c60cb390d1085bc97bdd6a1ae968757421df394b071848b52b1c09c89d6a5
     container_name: gcdis-postgres
     restart: always
     <<: *app-hardening
@@ -591,7 +591,7 @@ services:
   #     Restores the newest backup into a throwaway PostgreSQL (tmpfs, no volume) and
   #     compares row counts with the live database. Never writes to production.
   restore-scratch:
-    image: postgres:16-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+    image: postgres:18-alpine@sha256:898c60cb390d1085bc97bdd6a1ae968757421df394b071848b52b1c09c89d6a5
     profiles: ["restore-drill"]
     restart: "no"
     <<: *app-hardening
