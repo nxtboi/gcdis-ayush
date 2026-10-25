@@ -22,7 +22,7 @@ services:
       - gcdis-internal
 
   redis:
-    image: redis:7-alpine@sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499
+    image: redis:8-alpine@sha256:0bf6577d7774e592b29d093e3ac9390eb91e13d72c21e506afce736de5e0eeb0
     container_name: gcdis-redis
     restart: unless-stopped
     # Only bind to localhost loopback for development; never expose to 0.0.0.0 host
